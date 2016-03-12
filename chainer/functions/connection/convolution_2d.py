@@ -9,7 +9,13 @@ from chainer.utils import type_check
 if cuda.cudnn_enabled:
     cudnn = cuda.cudnn
     libcudnn = cuda.cudnn.cudnn
+    _cudnn_version = libcudnn.getVersion()
     _fwd_pref = libcudnn.CUDNN_CONVOLUTION_FWD_SPECIFY_WORKSPACE_LIMIT
+    if _cudnn_version >= 4000:
+        _bwd_filter_pref = \
+            libcudnn.CUDNN_CONVOLUTION_BWD_FILTER_SPECIFY_WORKSPACE_LIMIT
+        _bwd_data_pref = \
+            libcudnn.CUDNN_CONVOLUTION_BWD_DATA_SPECIFY_WORKSPACE_LIMIT
 
 
 def _pair(x):
@@ -49,12 +55,12 @@ class Convolution2DFunction(function.Function):
 
     def forward_cpu(self, inputs):
         x, W = inputs[:2]
+        b = inputs[2] if len(inputs) == 3 else None
         kh, kw = W.shape[2:]
         self.col = conv.im2col_cpu(
             x, kh, kw, self.sy, self.sx, self.ph, self.pw)
         y = numpy.tensordot(self.col, W, ((1, 2, 3), (1, 2, 3)))
-        if len(inputs) == 3:
-            b = inputs[2]
+        if b is not None:
             y += b
         return numpy.rollaxis(y, 3, 1),
 
@@ -166,16 +172,54 @@ class Convolution2DFunction(function.Function):
             one = numpy.array(1, dtype=dtype).ctypes
             zero = numpy.array(0, dtype=dtype).ctypes
 
-            libcudnn.convolutionBackwardFilter_v2(
-                handle, one.data, x_desc.value, x.data.ptr,
-                gy_desc.value, gy.data.ptr, self.conv_desc.value,
-                zero.data, self.filter_desc.value, gW.data.ptr)
+            if _cudnn_version >= 4000:
+                self.max_workspace_size = c * kh * kw * 4
+                algo = libcudnn.getConvolutionBackwardFilterAlgorithm(
+                    handle, x_desc.value, gy_desc.value,
+                    self.conv_desc.value, self.filter_desc.value,
+                    _bwd_filter_pref, self.max_workspace_size)
+                workspace_size = \
+                    libcudnn.getConvolutionBackwardFilterWorkspaceSize(
+                        handle, x_desc.value, gy_desc.value,
+                        self.conv_desc.value, self.filter_desc.value, algo)
+                workspace = cuda.cupy.empty(
+                    (max(workspace_size // 4, 1),), dtype=x.dtype)
+
+                libcudnn.convolutionBackwardFilter_v3(
+                    handle, one.data, x_desc.value, x.data.ptr,
+                    gy_desc.value, gy.data.ptr, self.conv_desc.value,
+                    algo, workspace.data.ptr, workspace_size,
+                    zero.data, self.filter_desc.value, gW.data.ptr)
+            else:
+                libcudnn.convolutionBackwardFilter_v2(
+                    handle, one.data, x_desc.value, x.data.ptr,
+                    gy_desc.value, gy.data.ptr, self.conv_desc.value,
+                    zero.data, self.filter_desc.value, gW.data.ptr)
 
             gx = cuda.cupy.empty_like(x)
-            libcudnn.convolutionBackwardData_v2(
-                handle, one.data, self.filter_desc.value, W.data.ptr,
-                gy_desc.value, gy.data.ptr, self.conv_desc.value,
-                zero.data, x_desc.value, gx.data.ptr)
+
+            if _cudnn_version >= 4000:
+                algo = libcudnn.getConvolutionBackwardDataAlgorithm(
+                    handle, self.filter_desc.value, gy_desc.value,
+                    self.conv_desc.value, x_desc.value, _bwd_data_pref,
+                    self.max_workspace_size)
+                workspace_size = \
+                    libcudnn.getConvolutionBackwardDataWorkspaceSize(
+                        handle, self.filter_desc.value, gy_desc.value,
+                        self.conv_desc.value, x_desc.value, algo)
+                workspace = cuda.cupy.empty(
+                    (max(workspace_size // 4, 1),), dtype=x.dtype)
+
+                libcudnn.convolutionBackwardData_v3(
+                    handle, one.data, self.filter_desc.value, W.data.ptr,
+                    gy_desc.value, gy.data.ptr, self.conv_desc.value,
+                    algo, workspace.data.ptr, workspace_size,
+                    zero.data, x_desc.value, gx.data.ptr)
+            else:
+                libcudnn.convolutionBackwardData_v2(
+                    handle, one.data, self.filter_desc.value, W.data.ptr,
+                    gy_desc.value, gy.data.ptr, self.conv_desc.value,
+                    zero.data, x_desc.value, gx.data.ptr)
 
             if b is not None:
                 gb = cuda.cupy.empty_like(b)
@@ -231,9 +275,9 @@ def convolution_2d(x, W, b=None, stride=1, pad=0, use_cudnn=True):
         W (~chainer.Variable): Weight variable of shape
             :math:`(c_O, c_I, k_H, k_W)`.
         b (~chainer.Variable): Bias variable of length :math:`c_O` (optional).
-        stride (int or (int, int)): Stride of filter applications.
+        stride (int or pair of ints): Stride of filter applications.
             ``stride=s`` and ``stride=(s, s)`` are equivalent.
-        pad (int or (int, int)): Spatial padding width for input arrays.
+        pad (int or pair of ints): Spatial padding width for input arrays.
             ``pad=p`` and ``pad=(p, p)`` are equivalent.
         use_cudnn (bool): If True, then this function uses CuDNN if available.
 

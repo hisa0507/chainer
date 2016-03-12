@@ -169,22 +169,22 @@ class TestFunction(unittest.TestCase):
         ret = self.f(x1, x2)
         self.assertIsInstance(ret, chainer.Variable)
 
-    def test_call_sigle_return_value_cpu(self):
+    def test_call_single_return_value_cpu(self):
         self.f.forward_cpu.return_value = (cuda.to_cpu(self.y1),)
         self.check_call_single_return_value(False)
 
     @attr.gpu
-    def test_call_sigle_return_value_gpu(self):
+    def test_call_single_return_value_gpu(self):
         self.setup_gpu()
         self.f.forward_gpu.return_value = (cuda.to_gpu(self.y1),)
         self.check_call_single_return_value(False)
 
-    def test_call_sigle_return_value_volatile_cpu(self):
+    def test_call_single_return_value_volatile_cpu(self):
         self.f.forward_cpu.return_value = (cuda.to_cpu(self.y1),)
         self.check_call_single_return_value(True)
 
     @attr.gpu
-    def test_call_sigle_return_value_volatile_gpu(self):
+    def test_call_single_return_value_volatile_gpu(self):
         self.setup_gpu()
         self.f.forward_gpu.return_value = (cuda.to_gpu(self.y1),)
         self.check_call_single_return_value(True)
@@ -314,6 +314,53 @@ Actual: 1 < 2"""
         with self.assertRaisesRegexp(chainer.utils.type_check.InvalidType,
                                      msg):
             f(v)
+
+
+class TestFunctionDebug(unittest.TestCase):
+
+    def setUp(self):
+        self.original_debug = chainer.is_debug()
+        chainer.set_debug(True)
+        self.one = numpy.array([1], numpy.float32)
+        self.nan = numpy.array([float('nan')], numpy.float32)
+        self.f = chainer.Function()
+
+    def tearDown(self):
+        chainer.set_debug(self.original_debug)
+
+    def check_debug_forward(self, x_data):
+        x = chainer.Variable(x_data)
+        with self.assertRaises(RuntimeError):
+            self.f(x)
+
+    def test_debug_forward_cpu(self):
+        self.f.forward_cpu = mock.MagicMock(return_value=(self.nan,))
+        self.check_debug_forward(self.one)
+
+    @attr.gpu
+    def test_debug_forward_gpu(self):
+        self.f.forward_gpu = mock.MagicMock(
+            return_value=(cuda.to_gpu(self.nan),))
+        self.check_debug_forward(cuda.to_gpu(self.one))
+
+    def check_debug_backward(self, x_data):
+        x = chainer.Variable(x_data)
+        y = self.f(x)
+        with self.assertRaises(RuntimeError):
+            y.backward()
+
+    def test_debug_backward_cpu(self):
+        self.f.forward_cpu = mock.MagicMock(return_value=(self.one,))
+        self.f.backward_cpu = mock.MagicMock(return_value=(self.nan,))
+        self.check_debug_backward(self.one)
+
+    @attr.gpu
+    def test_debug_backward_gpu(self):
+        self.f.forward_gpu = mock.MagicMock(
+            return_value=(cuda.to_gpu(self.one),))
+        self.f.backward_gpu = mock.MagicMock(
+            return_value=(cuda.to_gpu(self.nan),))
+        self.check_debug_backward(cuda.to_gpu(self.one))
 
 
 testing.run_module(__name__, __file__)
