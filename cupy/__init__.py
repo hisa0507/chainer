@@ -7,8 +7,7 @@ import six
 from cupy import binary
 from cupy import core
 from cupy import creation
-# from cupy import indexing
-import indexing
+from cupy import indexing
 from cupy import io
 from cupy import linalg
 from cupy import logic
@@ -193,8 +192,8 @@ mintypecode = numpy.mintypecode
 # -----------------------------------------------------------------------------
 take = indexing.indexing.take
 diagonal = indexing.indexing.diagonal
-hangai = indexing.generate.hangai
 r_ = indexing.generate.r_
+c_ = indexing.generate.c_
 
 # -----------------------------------------------------------------------------
 # Input and output
